@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pan & Zoom Image</title>
+  <style>
+    :root{
+      --bg: #0b0f14;
+      --panel: rgba(15,23,42,.72);
+      --border: rgba(148,163,184,.22);
+      --text: #cbd5e1;
+      --muted: #94a3b8;
+    }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+      user-select: none;
+    }
+
+    #stage{
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      cursor: grab;
+      touch-action: none; /* quan trọng cho pan/zoom */
+    }
+    #stage.dragging{ cursor: grabbing; }
+
+    /* nền caro nhẹ cho dễ nhìn */
+    #stage::before{
+      content:"";
+      position:absolute; inset:0;
+      background:
+        linear-gradient(90deg, rgba(148,163,184,.06) 1px, transparent 1px) 0 0/40px 40px,
+        linear-gradient(rgba(148,163,184,.06) 1px, transparent 1px) 0 0/40px 40px;
+      pointer-events:none;
+    }
+
+    #img{
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform-origin: 0 0;
+      will-change: transform;
+      pointer-events: none;
+      -webkit-user-drag: none;
+      user-drag: none;
+    }
+
+    .hud{
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      border-radius: 12px;
+      backdrop-filter: blur(8px);
+      font-size: 13px;
+      line-height: 1.35;
+      max-width: min(520px, calc(100vw - 24px));
+    }
+    .row{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      margin-top: 6px;
+    }
+    .pill{
+      display:inline-flex; gap:8px; align-items:center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(2,6,23,.35);
+      color: var(--text);
+      font-size: 12px;
+    }
+    kbd{
+      background: rgba(148,163,184,.14);
+      border: 1px solid rgba(148,163,184,.25);
+      padding: 1px 6px;
+      border-radius: 7px;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .muted{ color: var(--muted); }
+
+    .btn{
+      cursor:pointer;
+      border: 1px solid var(--border);
+      background: rgba(2,6,23,.35);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+    }
+    .btn:hover{ background: rgba(2,6,23,.5); }
+
+    .toast{
+      position:absolute;
+      right: 12px;
+      bottom: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      backdrop-filter: blur(8px);
+      opacity: 0;
+      transform: translateY(6px);
+      transition: .18s ease;
+      pointer-events:none;
+      white-space: nowrap;
+    }
+    .toast.show{
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div id="stage" aria-label="Image stage">
+    <img id="img" alt="Image" />
+    <div class="hud">
+      <div><b>Pan & Zoom</b> <span class="muted">• kéo để pan, cuộn để zoom</span></div>
+      <div class="row">
+        <span class="pill">Reset: <kbd>Double-click</kbd> / <kbd>0</kbd> / <kbd>Space</kbd></span>
+        <span class="pill">Zoom: <kbd>+</kbd> <kbd>-</kbd> • Fit: <kbd>F</kbd> • 100%: <kbd>1</kbd></span>
+      </div>
+      <div class="row">
+        <button class="btn" id="btnFit">Fit</button>
+        <button class="btn" id="btn100">100%</button>
+        <button class="btn" id="btnReset">Reset</button>
+        <span class="pill">Scale: <span id="scaleTxt">1.00</span>x</span>
+      </div>
+      <div class="muted" style="margin-top:6px">
+        Tip: trackpad pinch zoom thường cũng work (tùy browser).
+      </div>
+    </div>
+    <div class="toast" id="toast"></div>
+  </div>
+
+  <script>
+    // =========================
+    // 1) ĐỔI TÊN ẢNH Ở ĐÂY
+    // =========================
+    const IMAGE_FILE = "my-image.jpg"; // ví dụ: "photo.png"
+
+    const stage = document.getElementById("stage");
+    const img = document.getElementById("img");
+    const scaleTxt = document.getElementById("scaleTxt");
+    const toast = document.getElementById("toast");
+
+    const btnFit = document.getElementById("btnFit");
+    const btn100 = document.getElementById("btn100");
+    const btnReset = document.getElementById("btnReset");
+
+    let scale = 1;
+    let x = 0;
+    let y = 0;
+
+    let isDragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    const MIN_SCALE = 0.03;
+    const MAX_SCALE = 40;
+
+    // load image
+    img.src = IMAGE_FILE;
+
+    function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+    function applyTransform(){
+      img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+      scaleTxt.textContent = scale.toFixed(2);
+    }
+
+    function showToast(text){
+      toast.textContent = text;
+      toast.classList.add("show");
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toast.classList.remove("show"), 900);
+    }
+
+    function fitToScreen(){
+      const rect = stage.getBoundingClientRect();
+      const w = img.naturalWidth || 0;
+      const h = img.naturalHeight || 0;
+      if (!w || !h) return;
+
+      const margin = 60;
+      const fit = Math.min(
+        (rect.width - margin) / w,
+        (rect.height - margin) / h
+      );
+
+      scale = clamp(fit, MIN_SCALE, 8);
+      x = -(w * scale) / 2;
+      y = -(h * scale) / 2;
+      applyTransform();
+      showToast("Fit");
+    }
+
+    function resetView(){
+      // reset = fit
+      fitToScreen();
+      showToast("Reset");
+    }
+
+    function set100(){
+      const w = img.naturalWidth || 0;
+      const h = img.naturalHeight || 0;
+      if (!w || !h) return;
+
+      scale = 1;
+      x = -(w * scale) / 2;
+      y = -(h * scale) / 2;
+      applyTransform();
+      showToast("100%");
+    }
+
+    // Zoom quanh vị trí con trỏ (giữ điểm không trôi)
+    function zoomAt(clientX, clientY, factor){
+      const rect = stage.getBoundingClientRect();
+      const mx = clientX - rect.left - rect.width / 2;
+      const my = clientY - rect.top - rect.height / 2;
+
+      const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
+
+      const wx = (mx - x) / scale;
+      const wy = (my - y) / scale;
+
+      scale = newScale;
+      x = mx - wx * scale;
+      y = my - wy * scale;
+
+      applyTransform();
+    }
+
+    // ---------- mouse drag ----------
+    stage.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      isDragging = true;
+      stage.classList.add("dragging");
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      x += dx;
+      y += dy;
+      applyTransform();
+    });
+
+    window.addEventListener("mouseup", () => {
+      isDragging = false;
+      stage.classList.remove("dragging");
+    });
+
+    // ---------- wheel zoom ----------
+    stage.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const delta = e.deltaY;
+      // deltaY > 0 => zoom out
+      const factor = Math.pow(1.0015, -delta); // mượt, hợp cả trackpad lẫn chuột
+      zoomAt(e.clientX, e.clientY, factor);
+    }, { passive: false });
+
+    // double click reset
+    stage.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      resetView();
+    });
+
+    // Buttons
+    btnFit.addEventListener("click", fitToScreen);
+    btn100.addEventListener("click", set100);
+    btnReset.addEventListener("click", resetView);
+
+    // Keyboard shortcuts
+    window.addEventListener("keydown", (e) => {
+      // tránh ảnh hưởng khi user đang gõ đâu đó (thường trang này không có input)
+      const key = e.key;
+
+      if (key === " "){ // Space
+        e.preventDefault();
+        resetView();
+      } else if (key === "0"){
+        resetView();
+      } else if (key === "f" || key === "F"){
+        fitToScreen();
+      } else if (key === "1"){
+        set100();
+      } else if (key === "+" || key === "="){
+        // zoom in
+        zoomAt(window.innerWidth/2, window.innerHeight/2, 1.12);
+        showToast("Zoom +");
+      } else if (key === "-" || key === "_"){
+        // zoom out
+        zoomAt(window.innerWidth/2, window.innerHeight/2, 1/1.12);
+        showToast("Zoom -");
+      }
+    });
+
+    // Fit khi ảnh load xong
+    img.addEventListener("load", () => {
+      fitToScreen();
+    });
+
+    // Nếu ảnh lỗi (đặt sai tên)
+    img.addEventListener("error", () => {
+      alert("Không tải được ảnh: " + IMAGE_FILE + "\nHãy kiểm tra tên file ảnh và nó có nằm cùng folder với index.html không.");
+    });
+
+    // Re-fit khi resize cửa sổ
+    window.addEventListener("resize", () => {
+      // giữ scale/x/y hiện tại cho khỏi “giật”
+      // nếu bạn muốn auto-fit lại khi resize, bật dòng dưới:
+      // fitToScreen();
+      applyTransform();
+    });
+  </script>
+</body>
+</html>
